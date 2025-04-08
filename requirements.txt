@@ -1,0 +1,33 @@
+# Dependencies for the YouTube Summary Bot
+
+# Core libraries
+python-dotenv>=0.19.0         # For loading environment variables from .env file
+APScheduler>=3.9.1            # For scheduling the job
+requests>=2.28.0              # For making HTTP requests (to OpenRouter API)
+
+# YouTube interaction
+yt-dlp>=2023.3.4              # For downloading videos (optional)
+youtube-transcript-api>=0.4.4 # For fetching transcripts
+# google-api-python-client     # Uncomment if using YouTube Data API v3 for video detection
+# google-auth-oauthlib         # Required for YouTube Data API
+# google-auth-httplib2         # Required for YouTube Data API
+
+# AI & NLP
+# openai>=0.27.0              # Removed - Using OpenRouter via requests instead
+spacy>=3.0.0                  # For NLP tasks (vocabulary extraction)
+# nltk                         # Alternative NLP library
+# python-Levenshtein           # Can be useful for string matching with nltk
+
+# Document generation
+python-docx>=0.8.11           # For creating .docx files
+# FPDF / reportlab             # Alternatives for PDF generation
+# Markdown                     # If implementing Markdown output
+
+# Cloud storage
+dropbox>=11.25.0              # For uploading to Dropbox
+# google-api-python-client     # Uncomment if using Google Drive API
+# google-auth-oauthlib         # Required for Google Drive API
+# google-auth-httplib2         # Required for Google Drive API
+
+# It's recommended to install the spaCy English model separately:
+# python -m spacy download en_core_web_sm 

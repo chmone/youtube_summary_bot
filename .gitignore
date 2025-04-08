@@ -1,0 +1,23 @@
+*.mp4
+*.mkv
+*.webm
+
+# Logs
+logs/
+last_processed_id.txt
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# OS generated files
+.DS_Store
+Thumbs.db 
