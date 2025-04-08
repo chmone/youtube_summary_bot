@@ -1,11 +1,13 @@
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import xml.etree.ElementTree as ET
 import re
 import urllib.parse
+import time
+import argparse
 from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 from docx import Document
@@ -13,7 +15,6 @@ import dropbox
 import spacy
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
-import time # Add time for potential future delays if needed
 
 # --- Configuration Loading ---
 load_dotenv() # Load environment variables from .env file for sensitive keys
@@ -267,78 +268,84 @@ def clean_llm_output(text):
 
 # --- Core Functions ---
 
-def get_latest_video_info_from_rss(channel_id):
+def get_recent_video_infos_from_rss(channel_id, max_count=15):
     """
-    Fetches the ID and title of the latest video from the channel's RSS feed.
-    Returns a dictionary {'id': video_id, 'title': video_title} or None if an error occurs.
+    Fetches metadata for recent videos from the channel's RSS feed.
+    Returns a list of dictionaries [{'id': ..., 'title': ..., 'published': ...}], 
+    sorted oldest to newest, up to max_count.
+    Returns an empty list on error.
     """
     if not channel_id:
         logging.error("YouTube Channel ID is missing in configuration.")
-        return None
+        return []
 
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    logging.info(f"Checking RSS feed for latest video: {feed_url}")
-
-    # Define expected namespaces
+    logging.info(f"Checking RSS feed for recent videos: {feed_url}")
     namespaces = {
         'atom': 'http://www.w3.org/2005/Atom',
-        'yt': 'http://www.youtube.com/xml/schemas/2015',
-        'media': 'http://search.yahoo.com/mrss/' # Often used, though maybe not needed for ID/title
+        'yt': 'http://www.youtube.com/xml/schemas/2015'
     }
+    videos = []
 
     try:
         response = requests.get(feed_url, timeout=15)
         response.raise_for_status()
+        root = ET.fromstring(response.content)
 
-        xml_content = response.content
-        # --- REMOVE Namespace Stripping --- 
-        # xml_content = re.sub(b' xmlns:yt="[^ "]+"', b'', xml_content)
-        # xml_content = re.sub(b' xmlns:media="[^ "]+"', b'', xml_content)
-        # xml_content = re.sub(b' xmlns="[^ "]+"', b'', xml_content, count=1)
+        entries = root.findall('atom:entry', namespaces)
+        logging.info(f"Found {len(entries)} entries in RSS feed.")
 
-        # Parse the original content
-        root = ET.fromstring(xml_content)
+        for entry in entries:
+            video_id_tag = entry.find('yt:videoId', namespaces)
+            title_tag = entry.find('atom:title', namespaces)
+            published_tag = entry.find('atom:published', namespaces) # Get published date
 
-        # Find the first entry using the Atom namespace
-        latest_entry = root.find('atom:entry', namespaces)
-
-        if latest_entry is not None:
-            # Find videoId and title using their respective namespaces
-            video_id_tag = latest_entry.find('yt:videoId', namespaces)
-            title_tag = latest_entry.find('atom:title', namespaces)
-
-            if video_id_tag is not None and title_tag is not None and video_id_tag.text and title_tag.text:
+            if video_id_tag is not None and title_tag is not None and published_tag is not None \
+               and video_id_tag.text and title_tag.text and published_tag.text:
+               
                 video_id = video_id_tag.text
                 video_title = title_tag.text
-                logging.info(f"Found latest video via RSS: ID={video_id}, Title='{video_title}'")
-                return {'id': video_id, 'title': video_title}
+                published_str = published_tag.text
+               
+                # Attempt to parse the published date string
+                try:
+                    # Format example: 2024-04-11T15:00:17+00:00
+                    published_dt = datetime.fromisoformat(published_str).astimezone(timezone.utc)
+                except ValueError:
+                    logging.warning(f"Could not parse published date '{published_str}' for video {video_id}. Skipping date info.")
+                    published_dt = None # Handle cases where date parsing fails
+               
+                videos.append({
+                    'id': video_id,
+                    'title': video_title,
+                    'published': published_dt
+                })
             else:
-                # Log details if tags or text are missing
-                missing = []
-                if video_id_tag is None: missing.append("yt:videoId tag")
-                elif video_id_tag.text is None: missing.append("yt:videoId text")
-                if title_tag is None: missing.append("atom:title tag")
-                elif title_tag.text is None: missing.append("atom:title text")
-                logging.warning(f"Could not find expected elements/text within the latest RSS entry. Missing: {', '.join(missing)}")
-                return None
-        else:
-            logging.warning("Could not find any <entry> tag using Atom namespace in the RSS feed.")
-            return None
+                 logging.warning(f"Skipping RSS entry due to missing id, title, or published date.")
+
+        # Sort videos by published date (oldest first)
+        # Handle entries where date parsing might have failed
+        videos.sort(key=lambda v: v['published'] if v['published'] else datetime.min.replace(tzinfo=timezone.utc))
+       
+        # Limit to max_count and return
+        return videos[:max_count]
 
     except requests.exceptions.Timeout:
         logging.error(f"Timeout error fetching RSS feed: {feed_url}")
-        return None
+        return []
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching RSS feed: {e}")
-        return None
+        return []
     except ET.ParseError as e:
         logging.error(f"Error parsing XML feed: {e}")
-        # Log the beginning of the content to help diagnose parsing issues
-        logging.debug(f"XML content received (start): {response.text[:500]}...")
-        return None
+        try:
+            logging.debug(f"XML content (start): {response.text[:500]}...")
+        except NameError: # response might not be defined if request failed earlier
+             pass 
+        return []
     except Exception as e:
-        logging.exception(f"An unexpected error occurred fetching/parsing RSS feed: {e}") # Log stack trace
-        return None
+        logging.exception(f"An unexpected error occurred fetching/parsing RSS feed: {e}")
+        return []
 
 def get_last_processed_video_id():
     """Reads the last processed video ID from a file."""
@@ -389,17 +396,24 @@ def get_transcript(video_id):
         logging.error(f"Could not retrieve transcript for video ID {video_id}: {e}")
         return None
 
-def generate_document(video_id, video_title, video_url, analysis, transcript):
-    """Generates the output document (.docx) with plain text + bold title formatting."""
+def generate_document(video_id, video_title, video_url, analysis, transcript, published_date=None):
+    """Generates the output document (.docx) using the video's publish date in the filename."""
     output_format = config.get('OUTPUT_FORMAT', 'docx').lower()
-    timestamp = datetime.now().strftime("%Y-%m-%d")
     
+    # Determine the date string for the filename
+    if published_date and isinstance(published_date, datetime):
+        date_str = published_date.strftime("%Y-%m-%d")
+        logging.debug(f"Using publish date for filename: {date_str}")
+    else:
+        logging.warning("Publish date not available or invalid, using current date for filename.")
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
     safe_title = re.sub(r'[\\/*?"<>|:]', '', video_title)
     safe_title = re.sub(r'\s+', ' ', safe_title).strip()
     safe_title = safe_title[:60]
     if not safe_title: safe_title = "Untitled_Video"
     
-    filename_base = f"{timestamp}_{safe_title}_Summary"
+    filename_base = f"{date_str}_{safe_title}_Summary" # Use determined date_str
     output_dir = "outputs/"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -476,19 +490,63 @@ def upload_to_dropbox(filepath):
 
 # --- Main Processing Logic ---
 
-def process_latest_video():
-    """Main workflow: get latest video, analyze transcript, generate doc, upload."""
-    logging.info("Starting check for new video via RSS feed...")
+def process_video(video_info):
+    """Processes a single video given its info dictionary.
+       Returns True if successful, False otherwise.
+    """
+    video_id = video_info['id']
+    video_title = video_info['title']
+    published_date = video_info.get('published') # Get the publish date
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    logging.info(f"--- Processing video: '{video_title}' ({video_id}) --- Published: {published_date}")
+
+    # 1. Download Video (Optional)
+    download_video(video_url, video_id)
+
+    # 2. Get Transcript
+    transcript = get_transcript(video_id)
+    if not transcript:
+        logging.error(f"Failed to get transcript for {video_id}. Skipping video.")
+        return False
+
+    # 3. Analyze Transcript
+    analysis_data = analyze_transcript(transcript)
+    # Basic check if analysis failed
+    if analysis_data.get('main_points', '').startswith('Analysis failed'):
+        logging.error(f"Analysis failed for {video_id}. Skipping document generation.")
+        return False # Indicate failure
+
+    # 4. Generate Document - Pass the published_date
+    output_filepath = generate_document(video_id, video_title, video_url, analysis_data, transcript, published_date)
+
+    # 5. Upload to Cloud
+    if output_filepath and dbx:
+        upload_to_dropbox(output_filepath)
+    elif output_filepath:
+         logging.warning("Dropbox upload skipped (no token/client init failed).")
+    else:
+        logging.error("Doc generation failed, cannot upload.")
+        # Consider if doc generation failure should stop processing or just be logged
+        return False # Treat doc failure as overall failure for this video
+
+    logging.info(f"--- Finished processing video: '{video_title}' ({video_id}) ---")
+    return True
+
+def process_latest_video_if_new():
+    """Checks the latest video from RSS and processes it only if it's new."""
+    logging.info("Checking for the single latest video...")
     channel_id = config.get('YOUTUBE_CHANNEL_ID')
     if not channel_id:
         logging.error("YOUTUBE_CHANNEL_ID not set. Cannot check videos.")
         return
 
-    latest_video_info = get_latest_video_info_from_rss(channel_id)
-    if not latest_video_info:
+    # Fetch recent videos (we only need the latest one here)
+    recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=1)
+    if not recent_videos:
         logging.warning("Could not determine latest video info from RSS feed.")
         return
 
+    latest_video_info = recent_videos[-1] # Get the newest (last in sorted list)
     latest_video_id = latest_video_info['id']
     video_title = latest_video_info['title']
     last_processed_id = get_last_processed_video_id()
@@ -498,52 +556,73 @@ def process_latest_video():
         return
 
     logging.info(f"New video detected via RSS! ID: {latest_video_id}, Title: '{video_title}'")
-    video_url = f"https://www.youtube.com/watch?v={latest_video_id}"
-    logging.info(f"Processing video: {video_title} ({video_url})")
+    
+    # Process the new video
+    success = process_video(latest_video_info)
 
-    # 1. Download Video (Optional)
-    download_video(video_url, latest_video_id)
+    # Update last processed ID only if processing was successful
+    if success:
+        save_last_processed_video_id(latest_video_id)
+        logging.info(f"Updated last processed video ID to: {latest_video_id}")
+    else:
+         logging.warning(f"Processing failed for new video {latest_video_id}, not updating last processed ID.")
 
-    # 2. Get Transcript
-    transcript = get_transcript(latest_video_id)
-    if not transcript:
-        logging.error(f"Failed to get transcript for {latest_video_id}. Aborting.")
+# --- New Backfill Function ---
+def backfill_last_n_videos(count):
+    """Fetches and processes the specified number of most recent videos, regardless of processed state."""
+    logging.warning(f"--- Starting Backfill Mode for last {count} videos --- ")
+    logging.warning("NOTE: Backfill mode does NOT update the last_processed_id file.")
+    
+    channel_id = config.get('YOUTUBE_CHANNEL_ID')
+    if not channel_id:
+        logging.error("YOUTUBE_CHANNEL_ID not set. Cannot run backfill.")
         return
 
-    # 3. Analyze Transcript (Single API call)
-    analysis_data = analyze_transcript(transcript)
-    # analysis_data is now a dictionary like {'main_points': ..., 'tools': ..., ...}
+    # Fetch slightly more than requested in case some fail?
+    # Fetching max (e.g., 15) and slicing is safer.
+    recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=15)
+    if not recent_videos:
+        logging.error("Could not retrieve any videos from RSS feed for backfill.")
+        return
 
-    # 4. Generate Document (using analysis data)
-    output_filepath = generate_document(latest_video_id, video_title, video_url, analysis_data, transcript)
+    # Get the actual last 'count' videos from the list (newest first for processing)
+    videos_to_process = recent_videos[-count:] # Slice the newest 'count' videos
+    videos_to_process.reverse() # Process newest first? Or oldest first? Let's do newest first.
+    
+    logging.info(f"Attempting to backfill {len(videos_to_process)} videos (up to {count} requested)...")
 
-    # 5. Upload to Cloud
-    if output_filepath and dbx:
-        upload_to_dropbox(output_filepath)
-    elif output_filepath:
-         logging.warning("Dropbox upload skipped (no token/client init failed).")
-    else:
-        logging.error("Doc generation failed, cannot upload.")
-
-    # 6. Update last processed video ID
-    save_last_processed_video_id(latest_video_id)
-    logging.info(f"Finished processing video ID: {latest_video_id}")
-
+    processed_count = 0
+    failed_count = 0
+    for video_info in videos_to_process:
+        try:
+            success = process_video(video_info)
+            if success:
+                processed_count += 1
+            else:
+                failed_count += 1
+            # Optional: Add a short delay between videos in backfill mode?
+            # time.sleep(5) # e.g., 5 seconds
+        except Exception as e:
+            failed_count += 1
+            logging.exception(f"Unhandled exception processing video {video_info.get('id', 'N/A')} during backfill: {e}")
+           
+    logging.warning(f"--- Finished Backfill Mode --- ")
+    logging.info(f"Backfill summary: Successfully processed = {processed_count}, Failed = {failed_count}")
 
 # --- Scheduler ---
 
 def run_scheduler():
     scheduler = BlockingScheduler()
     polling_hours = config.get('POLLING_INTERVAL_HOURS', 6)
-    logging.info(f"Scheduler starting. Will check RSS feed for new videos every {polling_hours} hours.")
-    # Run once immediately
+    logging.info(f"Scheduler starting. Check RSS every {polling_hours} hrs.")
     try:
-        process_latest_video()
+        # Initial check uses the function that compares with last processed ID
+        process_latest_video_if_new()
     except Exception as e:
-        logging.exception("Unhandled exception during initial video processing run.")
-
-    # Then schedule subsequent runs
-    scheduler.add_job(process_latest_video, 'interval', hours=polling_hours)
+        logging.exception("Unhandled exception during initial run.")
+    
+    # Subsequent checks also only process if new
+    scheduler.add_job(process_latest_video_if_new, 'interval', hours=polling_hours)
     logging.info(f"Scheduled job to run every {polling_hours} hours.")
     try:
         scheduler.start()
@@ -552,10 +631,25 @@ def run_scheduler():
     except Exception as e:
         logging.exception("Scheduler failed unexpectedly.")
 
-
 if __name__ == "__main__":
     logging.info("Application starting...")
+    
+    # --- Argument Parsing ---
+    parser = argparse.ArgumentParser(description="YouTube Video Summarizer Bot.")
+    parser.add_argument(
+        "--backfill", 
+        type=int, 
+        metavar="N",
+        help="Process the last N videos from the RSS feed, ignoring the last processed ID."
+    )
+    args = parser.parse_args()
 
-    # --- Run the scheduler for continuous operation ---
-    # This will perform the first check immediately upon starting.
-    run_scheduler() 
+    # --- Main Execution Logic ---
+    if args.backfill:
+        if args.backfill > 0:
+            backfill_last_n_videos(args.backfill)
+        else:
+            logging.error("Value for --backfill must be a positive integer.")
+    else:
+        # Run the scheduler (normal mode)
+        run_scheduler() 
