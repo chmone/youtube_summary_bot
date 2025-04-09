@@ -9,7 +9,7 @@ import urllib.parse
 import time
 import argparse
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.errors import TranscriptsDisabled
+from youtube_transcript_api import TranscriptsDisabled
 import yt_dlp
 from docx import Document
 import dropbox
