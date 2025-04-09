@@ -348,18 +348,33 @@ def get_recent_video_infos_from_rss(channel_id, max_count=15):
         return []
 
 def get_last_processed_video_id():
-    """Reads the last processed video ID from a file."""
+    """Reads the last processed video ID from a file with added logging."""
+    filepath = config['LAST_PROCESSED_VIDEO_ID_FILE']
+    logging.info(f"Attempting to read last processed ID from: {filepath}")
     try:
-        with open(config['LAST_PROCESSED_VIDEO_ID_FILE'], 'r') as f:
-            return f.read().strip()
+        with open(filepath, 'r') as f:
+            video_id = f.read().strip()
+            logging.info(f"Successfully read last processed ID: {video_id}")
+            return video_id
     except FileNotFoundError:
+        logging.warning(f"State file not found: {filepath}. Will process the latest video as new.")
         return None
+    except Exception as e:
+        logging.error(f"Error reading state file {filepath}: {e}")
+        return None # Treat other errors as if no ID was found
 
 def save_last_processed_video_id(video_id):
-    """Saves the last processed video ID to a file."""
-    os.makedirs(os.path.dirname(config['LAST_PROCESSED_VIDEO_ID_FILE']), exist_ok=True)
-    with open(config['LAST_PROCESSED_VIDEO_ID_FILE'], 'w') as f:
-        f.write(video_id)
+    """Saves the last processed video ID to a file with added logging."""
+    filepath = config['LAST_PROCESSED_VIDEO_ID_FILE']
+    logging.info(f"Attempting to save last processed ID '{video_id}' to: {filepath}")
+    try:
+        # Ensure the directory exists within the volume
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'w') as f:
+            f.write(video_id)
+        logging.info(f"Successfully saved last processed ID: {video_id}")
+    except Exception as e:
+        logging.error(f"Error writing state file {filepath}: {e}")
 
 def download_video(video_url, video_id):
     """Downloads the video using yt-dlp (optional based on config)."""
@@ -533,37 +548,38 @@ def process_video(video_info):
     return True
 
 def process_latest_video_if_new():
-    """Checks the latest video from RSS and processes it only if it's new."""
+    """Checks the latest video from RSS and processes it only if it's new, with added logging."""
     logging.info("Checking for the single latest video...")
     channel_id = config.get('YOUTUBE_CHANNEL_ID')
     if not channel_id:
         logging.error("YOUTUBE_CHANNEL_ID not set. Cannot check videos.")
         return
 
-    # Fetch recent videos (we only need the latest one here)
     recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=1)
     if not recent_videos:
         logging.warning("Could not determine latest video info from RSS feed.")
         return
 
-    latest_video_info = recent_videos[-1] # Get the newest (last in sorted list)
+    latest_video_info = recent_videos[-1]
     latest_video_id = latest_video_info['id']
     video_title = latest_video_info['title']
+    
+    # Explicitly log the comparison
     last_processed_id = get_last_processed_video_id()
+    logging.info(f"Comparing Latest ID '{latest_video_id}' ('{video_title}') with Last Processed ID '{last_processed_id}'")
 
     if latest_video_id == last_processed_id:
-        logging.info(f"No new video found via RSS. Latest: '{video_title}' ({latest_video_id})")
+        logging.info(f"No new video found. IDs match.")
         return
 
-    logging.info(f"New video detected via RSS! ID: {latest_video_id}, Title: '{video_title}'")
+    logging.info(f"New video detected! ID '{latest_video_id}' != Last Processed ID '{last_processed_id}'")
     
-    # Process the new video
     success = process_video(latest_video_info)
 
-    # Update last processed ID only if processing was successful
     if success:
+        # Log before saving
+        logging.info(f"Video processing successful. Preparing to save ID: {latest_video_id}")
         save_last_processed_video_id(latest_video_id)
-        logging.info(f"Updated last processed video ID to: {latest_video_id}")
     else:
          logging.warning(f"Processing failed for new video {latest_video_id}, not updating last processed ID.")
 
