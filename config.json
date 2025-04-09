@@ -1,9 +1,9 @@
 {
   "YOUTUBE_CHANNEL_URL": "https://www.youtube.com/@parkerrexdaily",
-  "YOUTUBE_CHANNEL_ID": "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+  "YOUTUBE_CHANNEL_ID": "UCecfdozd4wiDEuc6tq0hJoQ",
   "YOUTUBE_API_KEY": null,
   "DROPBOX_ACCESS_TOKEN": null,
-  "OPENROUTER_MODEL": "mistralai/mistral-7b-instruct",
+  "OPENROUTER_MODEL": "google/gemini-2.5-pro-preview-03-25",
 
   "OUTPUT_FORMAT": "docx",
   "POLLING_INTERVAL_HOURS": 6,
