@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
 import xml.etree.ElementTree as ET
 import re
@@ -548,24 +548,33 @@ def process_video(video_info):
     return True
 
 def process_latest_video_if_new():
-    """Checks the latest video from RSS (assuming newest first) and processes if new."""
+    """Checks the latest video from RSS, handles future premieres, and processes if new."""
     logging.info("Checking for the single latest video...")
     channel_id = config.get('YOUTUBE_CHANNEL_ID')
     if not channel_id:
         logging.error("YOUTUBE_CHANNEL_ID not set.")
         return
 
-    # Fetch recent videos (newest first)
-    recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=5) # Get up to 5
+    recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=5)
     if not recent_videos:
         logging.warning("Could not determine any video info from RSS feed.")
         return
 
-    # The first video in the list should be the actual latest one
-    latest_video_info = recent_videos[0] 
+    latest_video_info = recent_videos[0]
     latest_video_id = latest_video_info['id']
     video_title = latest_video_info['title']
+    published_date = latest_video_info.get('published')
+
+    # --- Add Check for Future Published Date --- 
+    now_utc = datetime.now(timezone.utc)
+    # Add a small buffer (e.g., 5 mins) to avoid issues if processing starts *exactly* at publish time
+    future_buffer = timedelta(minutes=5)
     
+    if published_date and published_date > (now_utc + future_buffer):
+        logging.info(f"Latest video '{video_title}' ({latest_video_id}) has a future publish date ({published_date}). Skipping check until it's live.")
+        return # Exit without processing or updating state
+
+    # --- Proceed with normal comparison if not a future video ---
     last_processed_id = get_last_processed_video_id()
     logging.info(f"Comparing Latest ID from feed '{latest_video_id}' ('{video_title}') with Last Processed ID '{last_processed_id}'")
 
@@ -575,6 +584,7 @@ def process_latest_video_if_new():
 
     logging.info(f"New video detected! ID '{latest_video_id}' != Last Processed ID '{last_processed_id}'")
     
+    # --- Process the presumably live new video ---
     success = process_video(latest_video_info)
 
     if success:
