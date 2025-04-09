@@ -9,6 +9,7 @@ import urllib.parse
 import time
 import argparse
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.errors import TranscriptsDisabled
 import yt_dlp
 from docx import Document
 import dropbox
@@ -400,14 +401,25 @@ def download_video(video_url, video_id):
         return None
 
 def get_transcript(video_id):
-    """Fetches the transcript using youtube-transcript-api."""
+    """Fetches the transcript, handling premiere errors specifically."""
     try:
         logging.info(f"Fetching transcript for video ID: {video_id}")
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
         transcript_text = " ".join([item['text'] for item in transcript_list])
         logging.info(f"Transcript fetched successfully for video ID: {video_id}")
         return transcript_text
+    except TranscriptsDisabled as e:
+        # Check if the error message indicates it's a future premiere
+        error_message = str(e)
+        if "Premieres in" in error_message:
+            logging.info(f"Transcript unavailable for {video_id} because it is premiering later. Details: {error_message}")
+            return "PREMIERE_PENDING" # Special return value
+        else:
+            # It's disabled for other reasons (e.g., owner disabled, auto-caps failed)
+            logging.error(f"Could not retrieve transcript for video ID {video_id} (Transcripts Disabled): {error_message}")
+            return None
     except Exception as e:
+        # Catch other potential errors (NoTranscriptFound, network issues, etc.)
         logging.error(f"Could not retrieve transcript for video ID {video_id}: {e}")
         return None
 
@@ -506,32 +518,38 @@ def upload_to_dropbox(filepath):
 # --- Main Processing Logic ---
 
 def process_video(video_info):
-    """Processes a single video given its info dictionary.
-       Returns True if successful, False otherwise.
-    """
+    """Processes a single video given its info dictionary."""
     video_id = video_info['id']
     video_title = video_info['title']
-    published_date = video_info.get('published') # Get the publish date
+    published_date = video_info.get('published')
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     logging.info(f"--- Processing video: '{video_title}' ({video_id}) --- Published: {published_date}")
 
     # 1. Download Video (Optional)
     download_video(video_url, video_id)
 
-    # 2. Get Transcript
-    transcript = get_transcript(video_id)
-    if not transcript:
+    # 2. Get Transcript (Handles Premiere Check)
+    transcript_result = get_transcript(video_id)
+    
+    if transcript_result == "PREMIERE_PENDING":
+        # Log info and signal failure without error tone, don't update state
+        logging.info(f"Skipping processing for {video_id} as it has not premiered yet.")
+        return False 
+    elif transcript_result is None:
+        # Log error as transcript genuinely failed or is unavailable
         logging.error(f"Failed to get transcript for {video_id}. Skipping video.")
         return False
+    else:
+        # We have the transcript text
+        transcript = transcript_result
 
     # 3. Analyze Transcript
     analysis_data = analyze_transcript(transcript)
-    # Basic check if analysis failed
     if analysis_data.get('main_points', '').startswith('Analysis failed'):
         logging.error(f"Analysis failed for {video_id}. Skipping document generation.")
-        return False # Indicate failure
+        return False
 
-    # 4. Generate Document - Pass the published_date
+    # 4. Generate Document
     output_filepath = generate_document(video_id, video_title, video_url, analysis_data, transcript, published_date)
 
     # 5. Upload to Cloud
@@ -541,14 +559,13 @@ def process_video(video_info):
          logging.warning("Dropbox upload skipped (no token/client init failed).")
     else:
         logging.error("Doc generation failed, cannot upload.")
-        # Consider if doc generation failure should stop processing or just be logged
-        return False # Treat doc failure as overall failure for this video
+        return False
 
     logging.info(f"--- Finished processing video: '{video_title}' ({video_id}) ---")
     return True
 
 def process_latest_video_if_new():
-    """Checks the latest video from RSS, handles future premieres, and processes if new."""
+    """Checks the latest video from RSS and processes if new."""
     logging.info("Checking for the single latest video...")
     channel_id = config.get('YOUTUBE_CHANNEL_ID')
     if not channel_id:
@@ -563,18 +580,9 @@ def process_latest_video_if_new():
     latest_video_info = recent_videos[0]
     latest_video_id = latest_video_info['id']
     video_title = latest_video_info['title']
-    published_date = latest_video_info.get('published')
+    # published_date = latest_video_info.get('published') # No longer needed for check here
 
-    # --- Add Check for Future Published Date --- 
-    now_utc = datetime.now(timezone.utc)
-    # Add a small buffer (e.g., 5 mins) to avoid issues if processing starts *exactly* at publish time
-    future_buffer = timedelta(minutes=5)
-    
-    if published_date and published_date > (now_utc + future_buffer):
-        logging.info(f"Latest video '{video_title}' ({latest_video_id}) has a future publish date ({published_date}). Skipping check until it's live.")
-        return # Exit without processing or updating state
-
-    # --- Proceed with normal comparison if not a future video ---
+    # --- Proceed with normal comparison --- 
     last_processed_id = get_last_processed_video_id()
     logging.info(f"Comparing Latest ID from feed '{latest_video_id}' ('{video_title}') with Last Processed ID '{last_processed_id}'")
 
@@ -584,14 +592,14 @@ def process_latest_video_if_new():
 
     logging.info(f"New video detected! ID '{latest_video_id}' != Last Processed ID '{last_processed_id}'")
     
-    # --- Process the presumably live new video ---
-    success = process_video(latest_video_info)
+    success = process_video(latest_video_info) # Process_video now handles premiere skipping internally
 
     if success:
         logging.info(f"Video processing successful. Preparing to save ID: {latest_video_id}")
         save_last_processed_video_id(latest_video_id)
     else:
-         logging.warning(f"Processing failed for new video {latest_video_id}, not updating last processed ID.")
+        # Log warning, but note that premiere skips are logged as INFO inside process_video
+         logging.warning(f"Processing concluded for {latest_video_id} without success, not updating last processed ID.") 
 
 # --- New Backfill Function ---
 def backfill_last_n_videos(count):
