@@ -565,41 +565,60 @@ def process_video(video_info):
     return True
 
 def process_latest_video_if_new():
-    """Checks the latest video from RSS and processes if new."""
-    logging.info("Checking for the single latest video...")
+    """Checks recent videos from RSS and processes the newest *live* video found that hasn't been processed."""
+    logging.info("Checking for new live videos...")
     channel_id = config.get('YOUTUBE_CHANNEL_ID')
     if not channel_id:
         logging.error("YOUTUBE_CHANNEL_ID not set.")
         return
 
-    recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=5)
+    # Fetch the top few recent videos (newest first)
+    recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=5) 
     if not recent_videos:
         logging.warning("Could not determine any video info from RSS feed.")
         return
 
-    latest_video_info = recent_videos[0]
-    latest_video_id = latest_video_info['id']
-    video_title = latest_video_info['title']
-    # published_date = latest_video_info.get('published') # No longer needed for check here
-
-    # --- Proceed with normal comparison --- 
     last_processed_id = get_last_processed_video_id()
-    logging.info(f"Comparing Latest ID from feed '{latest_video_id}' ('{video_title}') with Last Processed ID '{last_processed_id}'")
+    logging.info(f"Last successfully processed ID: {last_processed_id}")
 
-    if latest_video_id == last_processed_id:
-        logging.info(f"No new video found. IDs match.")
-        return
+    new_video_processed = False
+    processed_this_run_id = None
 
-    logging.info(f"New video detected! ID '{latest_video_id}' != Last Processed ID '{last_processed_id}'")
-    
-    success = process_video(latest_video_info) # Process_video now handles premiere skipping internally
+    # Iterate through fetched videos (newest first)
+    for video_info in recent_videos:
+        current_video_id = video_info['id']
+        current_video_title = video_info['title']
+        logging.info(f"Checking video: '{current_video_title}' ({current_video_id})")
 
-    if success:
-        logging.info(f"Video processing successful. Preparing to save ID: {latest_video_id}")
-        save_last_processed_video_id(latest_video_id)
-    else:
-        # Log warning, but note that premiere skips are logged as INFO inside process_video
-         logging.warning(f"Processing concluded for {latest_video_id} without success, not updating last processed ID.") 
+        # Check if we have reached the last successfully processed video
+        if current_video_id == last_processed_id:
+            logging.info(f"Reached last successfully processed video ({current_video_id}). No newer videos to process in this batch.")
+            new_video_processed = False # Ensure flag is false if we hit this
+            break # Stop checking older videos
+
+        # If the video is potentially new, try processing it
+        logging.info(f"Attempting to process potentially new video: {current_video_id}")
+        success = process_video(video_info) # process_video handles premiere check internally
+
+        if success:
+            # Found the newest, unprocessed, LIVE video and processed it successfully!
+            logging.info(f"Successfully processed new video: {current_video_id}")
+            processed_this_run_id = current_video_id
+            new_video_processed = True
+            break # Stop after processing the first successfully processed new video
+        else:
+            # Processing failed (could be premiere, transcript error, etc.) - Logged in process_video
+            # Continue to the next video in the list (try the next newest)
+            logging.warning(f"Failed to process {current_video_id}. Will check next video in feed (if any).")
+            pass 
+
+    # After checking the videos, save the ID if a *new* one was *successfully* processed
+    if new_video_processed and processed_this_run_id:
+        logging.info(f"Video processing successful for this run. Preparing to save ID: {processed_this_run_id}")
+        save_last_processed_video_id(processed_this_run_id)
+    elif not new_video_processed:
+        logging.info("No new live videos processed in this run.")
+    # Implicitly handles case where loop finished without success - no ID saved
 
 # --- New Backfill Function ---
 def backfill_last_n_videos(count):
