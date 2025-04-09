@@ -268,23 +268,20 @@ def clean_llm_output(text):
 
 # --- Core Functions ---
 
-def get_recent_video_infos_from_rss(channel_id, max_count=15):
+def get_recent_video_infos_from_rss(channel_id, max_count=5): # Fetch a few by default
     """
     Fetches metadata for recent videos from the channel's RSS feed.
+    Assumes feed lists newest videos first. 
     Returns a list of dictionaries [{'id': ..., 'title': ..., 'published': ...}], 
-    sorted oldest to newest, up to max_count.
+    up to max_count, in the order found in the feed (newest first).
     Returns an empty list on error.
     """
     if not channel_id:
-        logging.error("YouTube Channel ID is missing in configuration.")
+        logging.error("YouTube Channel ID is missing.")
         return []
-
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     logging.info(f"Checking RSS feed for recent videos: {feed_url}")
-    namespaces = {
-        'atom': 'http://www.w3.org/2005/Atom',
-        'yt': 'http://www.youtube.com/xml/schemas/2015'
-    }
+    namespaces = {'atom': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/schemas/2015'}
     videos = []
 
     try:
@@ -295,40 +292,43 @@ def get_recent_video_infos_from_rss(channel_id, max_count=15):
         entries = root.findall('atom:entry', namespaces)
         logging.info(f"Found {len(entries)} entries in RSS feed.")
 
-        for entry in entries:
+        # Process entries in the order they appear (should be newest first)
+        for i, entry in enumerate(entries):
+            if len(videos) >= max_count:
+                break # Stop processing if we hit the desired count
+
             video_id_tag = entry.find('yt:videoId', namespaces)
             title_tag = entry.find('atom:title', namespaces)
-            published_tag = entry.find('atom:published', namespaces) # Get published date
+            published_tag = entry.find('atom:published', namespaces)
 
             if video_id_tag is not None and title_tag is not None and published_tag is not None \
                and video_id_tag.text and title_tag.text and published_tag.text:
-               
+                
                 video_id = video_id_tag.text
                 video_title = title_tag.text
                 published_str = published_tag.text
-               
-                # Attempt to parse the published date string
+                published_dt = None
                 try:
-                    # Format example: 2024-04-11T15:00:17+00:00
                     published_dt = datetime.fromisoformat(published_str).astimezone(timezone.utc)
                 except ValueError:
-                    logging.warning(f"Could not parse published date '{published_str}' for video {video_id}. Skipping date info.")
-                    published_dt = None # Handle cases where date parsing fails
-               
-                videos.append({
+                    logging.warning(f"Could not parse date '{published_str}' for video {video_id}.")
+                
+                video_data = {
                     'id': video_id,
                     'title': video_title,
                     'published': published_dt
-                })
+                }
+                videos.append(video_data)
+                
+                # Log details of the very first video found
+                if i == 0:
+                    logging.info(f"First video entry found in feed: ID={video_id}, Title='{video_title}', Published={published_str}")
             else:
-                 logging.warning(f"Skipping RSS entry due to missing id, title, or published date.")
+                 logging.warning(f"Skipping RSS entry #{i+1} due to missing id, title, or published date.")
 
-        # Sort videos by published date (oldest first)
-        # Handle entries where date parsing might have failed
-        videos.sort(key=lambda v: v['published'] if v['published'] else datetime.min.replace(tzinfo=timezone.utc))
-       
-        # Limit to max_count and return
-        return videos[:max_count]
+        # Return the list as found (newest first)
+        logging.info(f"Returning {len(videos)} video infos (newest first).")
+        return videos
 
     except requests.exceptions.Timeout:
         logging.error(f"Timeout error fetching RSS feed: {feed_url}")
@@ -340,7 +340,7 @@ def get_recent_video_infos_from_rss(channel_id, max_count=15):
         logging.error(f"Error parsing XML feed: {e}")
         try:
             logging.debug(f"XML content (start): {response.text[:500]}...")
-        except NameError: # response might not be defined if request failed earlier
+        except NameError: 
              pass 
         return []
     except Exception as e:
@@ -548,25 +548,26 @@ def process_video(video_info):
     return True
 
 def process_latest_video_if_new():
-    """Checks the latest video from RSS and processes it only if it's new, with added logging."""
+    """Checks the latest video from RSS (assuming newest first) and processes if new."""
     logging.info("Checking for the single latest video...")
     channel_id = config.get('YOUTUBE_CHANNEL_ID')
     if not channel_id:
-        logging.error("YOUTUBE_CHANNEL_ID not set. Cannot check videos.")
+        logging.error("YOUTUBE_CHANNEL_ID not set.")
         return
 
-    recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=1)
+    # Fetch recent videos (newest first)
+    recent_videos = get_recent_video_infos_from_rss(channel_id, max_count=5) # Get up to 5
     if not recent_videos:
-        logging.warning("Could not determine latest video info from RSS feed.")
+        logging.warning("Could not determine any video info from RSS feed.")
         return
 
-    latest_video_info = recent_videos[-1]
+    # The first video in the list should be the actual latest one
+    latest_video_info = recent_videos[0] 
     latest_video_id = latest_video_info['id']
     video_title = latest_video_info['title']
     
-    # Explicitly log the comparison
     last_processed_id = get_last_processed_video_id()
-    logging.info(f"Comparing Latest ID '{latest_video_id}' ('{video_title}') with Last Processed ID '{last_processed_id}'")
+    logging.info(f"Comparing Latest ID from feed '{latest_video_id}' ('{video_title}') with Last Processed ID '{last_processed_id}'")
 
     if latest_video_id == last_processed_id:
         logging.info(f"No new video found. IDs match.")
@@ -577,7 +578,6 @@ def process_latest_video_if_new():
     success = process_video(latest_video_info)
 
     if success:
-        # Log before saving
         logging.info(f"Video processing successful. Preparing to save ID: {latest_video_id}")
         save_last_processed_video_id(latest_video_id)
     else:
